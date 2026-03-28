@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #F5F3FF;
+    color: #2D2A32;
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100dvh;
+    overscroll-behavior: none;
+  }
+
+  #root {
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+@layer utilities {
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 16px);
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Confetti pieces */
+.confetti-piece {
+  position: fixed;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  animation: confettiFall var(--duration, 3s) ease-in var(--delay, 0s) forwards;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Smooth screen transitions */
+.screen-enter {
+  animation: slideUp 0.35s ease-out;
+}
+
+/* Voice recording pulse */
+@keyframes recordPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 207, 232, 0.7); }
+  50% { box-shadow: 0 0 0 12px rgba(251, 207, 232, 0); }
+}
+
+.recording-pulse {
+  animation: recordPulse 1.5s ease-in-out infinite;
+}
+
+/* Timer ring */
+.timer-ring {
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #C4B5FD;
+  border-radius: 4px;
+}
+
+/* Focus styles — accessible but not harsh */
+*:focus-visible {
+  outline: 2px solid #C4B5FD;
+  outline-offset: 2px;
+  border-radius: 8px;
+}
