@@ -272,9 +272,7 @@ This project is in early demo stage. If you have ADHD and want to share feedback
 
 <div align="center">
 
-Built with care for anyone who's ever stared at a blank page and felt like the worst version of themselves.
-
-**You're not broken. The tools were.**
+Built with care for anyone who's ever stared at a blank page and felt stuck.
 
 [Try Mello →](https://mello-black.vercel.app/)
 
