@@ -45,12 +45,14 @@ export default function FocusMode({
   const currentSubtask = subtasks[currentSubtaskIndex]
   const isLastSubtask = currentSubtaskIndex >= subtasks.length - 1
 
-  if (!currentSubtask) return null
-
-  const handleStart = () => {
-    setShowTimer(true)
+  // Reset timer state when the step changes
+  const prevIndexRef = useState(currentSubtaskIndex)[0]
+  if (prevIndexRef !== currentSubtaskIndex) {
+    setShowTimer(false)
     setTimerDone(false)
   }
+
+  if (!currentSubtask) return null
 
   const handleTimerComplete = () => {
     setTimerDone(true)
@@ -106,16 +108,13 @@ export default function FocusMode({
         </div>
       </Card>
 
-      {/* Timer Section */}
+      {/* Timer section */}
       {showTimer ? (
-        <div className="mb-6 flex flex-col items-center gap-4 animate-fade-in">
-          <Timer
-            initialSeconds={300}
-            onComplete={handleTimerComplete}
-          />
+        <div className="mb-6 flex flex-col items-center gap-2 animate-fade-in">
+          <Timer onComplete={handleTimerComplete} />
           {timerDone && (
-            <p className="text-center text-mello-success-text font-semibold animate-slide-up">
-              5 minutes done! Amazing! 🌟
+            <p className="text-center text-mello-success-text font-semibold animate-slide-up mt-1">
+              Timer done! Amazing work 🌟
             </p>
           )}
         </div>
@@ -125,13 +124,11 @@ export default function FocusMode({
       <div className="space-y-3">
         {!showTimer ? (
           <>
-            {/* PRIMARY: Start */}
-            <Button onClick={handleStart} fullWidth size="xl" variant="primary">
-              ▶ Start — just 5 minutes
+            <Button onClick={() => setShowTimer(true)} fullWidth size="xl" variant="primary">
+              ▶ Start with a timer
             </Button>
-            {/* Already started, mark done */}
             <Button onClick={handleDone} fullWidth size="md" variant="success">
-              ✓ I finished this step
+              ✓ I already finished this step
             </Button>
           </>
         ) : (
@@ -140,13 +137,7 @@ export default function FocusMode({
           </Button>
         )}
 
-        {/* STUCK BUTTON — equally accessible, never hidden */}
-        <Button
-          onClick={onStuck}
-          fullWidth
-          size="md"
-          variant="secondary"
-        >
+        <Button onClick={onStuck} fullWidth size="md" variant="secondary">
           😶 I'm stuck — make it smaller
         </Button>
       </div>
