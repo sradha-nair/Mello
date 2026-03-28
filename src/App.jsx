@@ -1,16 +1,5 @@
-/**
- * App.jsx — Mello's central state machine
- *
- * Screens flow:
- *  ENERGY_CHECK → BRAIN_DUMP → BREAKING_DOWN → FOCUS → CELEBRATION → (loop or ALL_DONE)
- *                                                    ↓
- *                                                STUCK_MODE → FOCUS
- *
- * Philosophy: Every screen transition must REDUCE friction, never add it.
- * The user should never feel lost or have to think about "what do I do next?"
- */
-
 import { useState, useCallback, useEffect } from 'react'
+import Auth from './components/screens/Auth'
 import EnergyCheck from './components/screens/EnergyCheck'
 import BrainDump from './components/screens/BrainDump'
 import BreakingDown from './components/screens/BreakingDown'
@@ -18,21 +7,21 @@ import FocusMode from './components/screens/FocusMode'
 import StuckMode from './components/screens/StuckMode'
 import Celebration from './components/screens/Celebration'
 import AllDone from './components/screens/AllDone'
-import { breakdownTask, getStuckStep, suggestTaskByEnergy } from './lib/ai'
+import Dashboard from './components/screens/Dashboard'
+import { breakdownTask, getStuckStep } from './lib/ai'
 import {
-  saveTasks,
-  loadTasks,
-  saveAppState,
-  loadAppState,
-  saveEnergyLevel,
-  loadEnergyLevel,
-  incrementCompletedCount,
-  loadCompletedCount,
-  clearAllData,
-  generateId,
+  saveTasks, loadTasks,
+  saveAppState, loadAppState,
+  saveEnergyLevel, loadEnergyLevel,
+  incrementCompletedCount, loadCompletedCount,
+  saveFocusSession, saveCategory, loadCategories,
+  getStatsForDashboard,
+  clearAllData, generateId,
 } from './lib/storage'
+import { onAuthChange, signOut, isSupabaseConfigured, syncSessionToCloud, syncTasksToCloud } from './lib/supabase'
 
 const SCREEN = {
+  AUTH: 'auth',
   ENERGY_CHECK: 'energy_check',
   BRAIN_DUMP: 'brain_dump',
   BREAKING_DOWN: 'breaking_down',
@@ -41,32 +30,33 @@ const SCREEN = {
   CELEBRATING_STEP: 'celebrating_step',
   CELEBRATING_TASK: 'celebrating_task',
   ALL_DONE: 'all_done',
+  DASHBOARD: 'dashboard',
 }
 
 export default function App() {
-  // ── Core state ──────────────────────────────────────────────────────────────
-  const [screen, setScreen] = useState(SCREEN.ENERGY_CHECK)
+  const [screen, setScreen] = useState(SCREEN.AUTH)
+  const [user, setUser] = useState(null)
   const [energyLevel, setEnergyLevel] = useState(null)
-
-  // Tasks: [{ id, title, energy_level, status, subtasks: [] }]
   const [tasks, setTasks] = useState([])
-
-  // Which task we're currently working on
   const [currentTaskIndex, setCurrentTaskIndex] = useState(0)
-
-  // Subtasks for the current task
   const [currentSubtasks, setCurrentSubtasks] = useState([])
   const [currentSubtaskIndex, setCurrentSubtaskIndex] = useState(0)
-
-  // Stuck mode state
   const [stuckMicroSteps, setStuckMicroSteps] = useState([])
   const [isLoadingStuck, setIsLoadingStuck] = useState(false)
   const [stuckDepth, setStuckDepth] = useState(0)
-
-  // Completed steps counter (for dopamine feedback)
   const [completedCount, setCompletedCount] = useState(0)
+  // Track when the current step timer started (for focus session recording)
+  const [stepStartTime, setStepStartTime] = useState(null)
 
-  // ── Hydrate from localStorage on mount ─────────────────────────────────────
+  // ── Auth listener ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const unsub = onAuthChange(session => {
+      setUser(session?.user ?? null)
+    })
+    return unsub
+  }, [])
+
+  // ── Hydrate from localStorage ────────────────────────────────────────────
   useEffect(() => {
     const savedTasks = loadTasks()
     const savedState = loadAppState()
@@ -75,32 +65,34 @@ export default function App() {
 
     setCompletedCount(count)
 
-    if (savedTasks.length > 0) {
-      setTasks(savedTasks)
-    }
+    if (savedTasks.length > 0) setTasks(savedTasks)
 
     if (savedState && savedTasks.length > 0) {
       setEnergyLevel(savedState.energyLevel || savedEnergy)
       const taskIdx = savedState.currentTaskIndex || 0
       setCurrentTaskIndex(taskIdx)
-
       const task = savedTasks[taskIdx]
       if (task?.subtasks?.length > 0) {
         setCurrentSubtasks(task.subtasks)
         setCurrentSubtaskIndex(savedState.currentSubtaskIndex || 0)
-        // Restore to focus screen if we were in the middle of something
         if (task.status === 'active') {
           setScreen(SCREEN.FOCUS)
           return
         }
       }
     }
+
+    // Default: go to energy check after auth
+    setScreen(SCREEN.ENERGY_CHECK)
   }, [])
 
-  // ── Persist state changes ───────────────────────────────────────────────────
+  // ── Persist on change ─────────────────────────────────────────────────────
   useEffect(() => {
-    if (tasks.length > 0) saveTasks(tasks)
-  }, [tasks])
+    if (tasks.length > 0) {
+      saveTasks(tasks)
+      if (user) syncTasksToCloud(tasks, user.id)
+    }
+  }, [tasks, user])
 
   useEffect(() => {
     if (energyLevel) {
@@ -109,97 +101,96 @@ export default function App() {
     }
   }, [energyLevel, currentTaskIndex, currentSubtaskIndex])
 
-  // ── Derived values ──────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
   const currentTask = tasks[currentTaskIndex] || null
-  const pendingTasks = tasks.filter((t) => t.status !== 'completed' && t.status !== 'skipped')
-  const hasMoreTasks = currentTaskIndex < tasks.length - 1
+  const hasMoreTasks = tasks.some(
+    (t, i) => i > currentTaskIndex && t.status !== 'completed' && t.status !== 'skipped'
+  )
 
-  // ── Handlers ────────────────────────────────────────────────────────────────
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
-  /** Step 1: User selects energy level */
-  const handleEnergySelect = useCallback((level) => {
+  const handleAuthSkip = useCallback(() => setScreen(SCREEN.ENERGY_CHECK), [])
+
+  const handleEnergySelect = useCallback(level => {
     setEnergyLevel(level)
     saveEnergyLevel(level)
     setScreen(SCREEN.BRAIN_DUMP)
   }, [])
 
-  /** Step 2: User adds a task from brain dump */
-  const handleAddTask = useCallback(
-    (title) => {
-      const newTask = {
-        id: generateId(),
-        title,
-        energy_level: energyLevel || 'medium',
-        status: 'pending',
-        subtasks: [],
-        createdAt: Date.now(),
-      }
-      setTasks((prev) => {
-        const updated = [...prev, newTask]
-        saveTasks(updated)
-        return updated
-      })
-    },
-    [energyLevel]
-  )
-
-  /** Step 3: User is ready to focus */
-  const handleStartFocus = useCallback(async () => {
-    // Find the first pending task (or energy-matched task)
-    const allTasks = loadTasks()
-    const pending = allTasks.filter((t) => t.status !== 'completed' && t.status !== 'skipped')
-
-    if (pending.length === 0) {
-      setScreen(SCREEN.ALL_DONE)
-      return
+  const handleAddTask = useCallback((title, category = 'uncategorized') => {
+    const newTask = {
+      id: generateId(),
+      title,
+      energy_level: energyLevel || 'medium',
+      status: 'pending',
+      subtasks: [],
+      category,
+      createdAt: Date.now(),
     }
+    setTasks(prev => {
+      const updated = [...prev, newTask]
+      saveTasks(updated)
+      saveCategory(newTask.id, category)
+      return updated
+    })
+  }, [energyLevel])
 
-    const idx = tasks.findIndex((t) => t.id === pending[0].id)
-    setCurrentTaskIndex(idx >= 0 ? idx : 0)
+  const handleStartFocus = useCallback(async () => {
+    const allTasks = loadTasks()
+    const pending = allTasks.filter(t => t.status !== 'completed' && t.status !== 'skipped')
+    if (pending.length === 0) { setScreen(SCREEN.ALL_DONE); return }
+
+    const idx = tasks.findIndex(t => t.id === pending[0].id)
+    const targetIdx = idx >= 0 ? idx : 0
+    setCurrentTaskIndex(targetIdx)
     setCurrentSubtaskIndex(0)
-    await startBreakdown(pending[0], idx >= 0 ? idx : 0)
+    await startBreakdown(pending[0], targetIdx)
   }, [tasks])
 
-  /** Begin AI breakdown for a task */
   const startBreakdown = async (task, taskIdx) => {
     setScreen(SCREEN.BREAKING_DOWN)
     try {
       const steps = await breakdownTask(task.title, energyLevel || 'medium')
       setCurrentSubtasks(steps)
       setCurrentSubtaskIndex(0)
-
-      // Update task with subtasks and mark active
-      setTasks((prev) => {
+      setStepStartTime(Date.now())
+      setTasks(prev => {
         const updated = prev.map((t, i) =>
-          i === taskIdx
-            ? { ...t, subtasks: steps, status: 'active' }
-            : t
+          i === taskIdx ? { ...t, subtasks: steps, status: 'active' } : t
         )
         saveTasks(updated)
         return updated
       })
-
       setScreen(SCREEN.FOCUS)
-    } catch (err) {
-      console.error('Breakdown failed:', err)
-      // Fallback: use the raw task as a single step
-      const fallbackSteps = [task.title]
-      setCurrentSubtasks(fallbackSteps)
+    } catch {
+      const fallback = [task.title]
+      setCurrentSubtasks(fallback)
       setCurrentSubtaskIndex(0)
+      setStepStartTime(Date.now())
       setScreen(SCREEN.FOCUS)
     }
   }
 
-  /** User completes a subtask step */
   const handleCompleteStep = useCallback(() => {
+    // Record focus session with duration
+    const duration = stepStartTime ? Math.round((Date.now() - stepStartTime) / 1000) : 0
+    const categories = loadCategories()
+    const session = {
+      taskId: currentTask?.id,
+      taskTitle: currentTask?.title,
+      category: categories[currentTask?.id] || currentTask?.category || 'uncategorized',
+      duration,
+    }
+    saveFocusSession(session)
+    if (user) syncSessionToCloud(session, user.id)
+
     const newCount = incrementCompletedCount()
     setCompletedCount(newCount)
+    setStepStartTime(Date.now())
 
     const nextIdx = currentSubtaskIndex + 1
-
     if (nextIdx >= currentSubtasks.length) {
-      // All subtasks done → task complete
-      setTasks((prev) => {
+      setTasks(prev => {
         const updated = prev.map((t, i) =>
           i === currentTaskIndex ? { ...t, status: 'completed' } : t
         )
@@ -208,26 +199,21 @@ export default function App() {
       })
       setScreen(SCREEN.CELEBRATING_TASK)
     } else {
-      // More subtasks remain
       setCurrentSubtaskIndex(nextIdx)
       setStuckDepth(0)
       setScreen(SCREEN.CELEBRATING_STEP)
     }
-  }, [currentSubtaskIndex, currentSubtasks.length, currentTaskIndex])
+  }, [stepStartTime, currentTask, currentSubtaskIndex, currentSubtasks.length, currentTaskIndex, user])
 
-  /** User taps "I'm stuck" */
   const handleStuck = useCallback(async () => {
     const stuck = currentSubtasks[currentSubtaskIndex] || ''
-    const taskTitle = currentTask?.title || ''
-
     setStuckMicroSteps([])
     setIsLoadingStuck(true)
     setStuckDepth(0)
     setScreen(SCREEN.STUCK)
-
     try {
-      const microSteps = await getStuckStep(stuck, taskTitle)
-      setStuckMicroSteps(microSteps)
+      const micro = await getStuckStep(stuck, currentTask?.title || '')
+      setStuckMicroSteps(micro)
     } catch {
       setStuckMicroSteps([`Just open the thing you need for: "${stuck}"`])
     } finally {
@@ -235,17 +221,12 @@ export default function App() {
     }
   }, [currentSubtasks, currentSubtaskIndex, currentTask])
 
-  /** User wants to go even smaller from stuck mode */
   const handleGoEvenSmaller = useCallback(async () => {
-    const currentMicroStep = stuckMicroSteps[0] || ''
-    const taskTitle = currentTask?.title || ''
-
     setIsLoadingStuck(true)
-    setStuckDepth((d) => d + 1)
-
+    setStuckDepth(d => d + 1)
     try {
-      const tinySteps = await getStuckStep(currentMicroStep, taskTitle)
-      setStuckMicroSteps(tinySteps)
+      const tiny = await getStuckStep(stuckMicroSteps[0] || '', currentTask?.title || '')
+      setStuckMicroSteps(tiny)
     } catch {
       setStuckMicroSteps(['Just look at your screen', 'Take one slow breath', 'Move your mouse or tap once'])
     } finally {
@@ -253,33 +234,26 @@ export default function App() {
     }
   }, [stuckMicroSteps, currentTask])
 
-  /** User tries the micro-step from stuck mode */
   const handleTryMicroStep = useCallback(() => {
-    // Replace current subtask with the micro steps
-    const newSubtasks = [
-      ...stuckMicroSteps,
-      ...currentSubtasks.slice(currentSubtaskIndex + 1),
-    ]
+    const newSubtasks = [...stuckMicroSteps, ...currentSubtasks.slice(currentSubtaskIndex + 1)]
     setCurrentSubtasks(newSubtasks)
     setCurrentSubtaskIndex(0)
     setStuckDepth(0)
+    setStepStartTime(Date.now())
     setScreen(SCREEN.FOCUS)
   }, [stuckMicroSteps, currentSubtasks, currentSubtaskIndex])
 
-  /** User skips the current task */
   const handleSkipTask = useCallback(() => {
-    setTasks((prev) => {
+    setTasks(prev => {
       const updated = prev.map((t, i) =>
         i === currentTaskIndex ? { ...t, status: 'skipped' } : t
       )
       saveTasks(updated)
       return updated
     })
-
     const nextPending = tasks.findIndex(
       (t, i) => i > currentTaskIndex && t.status !== 'completed' && t.status !== 'skipped'
     )
-
     if (nextPending >= 0) {
       setCurrentTaskIndex(nextPending)
       setCurrentSubtaskIndex(0)
@@ -289,18 +263,11 @@ export default function App() {
     }
   }, [currentTaskIndex, tasks])
 
-  /** Continue after celebration */
   const handleContinueAfterCelebration = useCallback(() => {
-    if (screen === SCREEN.CELEBRATING_STEP) {
-      setScreen(SCREEN.FOCUS)
-      return
-    }
-
-    // Task completed — find next task
+    if (screen === SCREEN.CELEBRATING_STEP) { setScreen(SCREEN.FOCUS); return }
     const nextPending = tasks.findIndex(
       (t, i) => i > currentTaskIndex && t.status !== 'completed' && t.status !== 'skipped'
     )
-
     if (nextPending >= 0) {
       setCurrentTaskIndex(nextPending)
       setCurrentSubtaskIndex(0)
@@ -310,12 +277,8 @@ export default function App() {
     }
   }, [screen, tasks, currentTaskIndex])
 
-  /** Take a break — go back to energy check */
-  const handleTakeBreak = useCallback(() => {
-    setScreen(SCREEN.ENERGY_CHECK)
-  }, [])
+  const handleTakeBreak = useCallback(() => setScreen(SCREEN.ENERGY_CHECK), [])
 
-  /** Fresh start — clear everything */
   const handleFreshStart = useCallback(() => {
     clearAllData()
     setTasks([])
@@ -325,13 +288,21 @@ export default function App() {
     setEnergyLevel(null)
     setCompletedCount(0)
     setStuckDepth(0)
+    setStepStartTime(null)
     setScreen(SCREEN.ENERGY_CHECK)
   }, [])
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  const handleOpenDashboard = useCallback(() => setScreen(SCREEN.DASHBOARD), [])
 
-  // Background gradient subtly changes per screen — psychological grounding
+  const handleSignOut = useCallback(async () => {
+    await signOut()
+    setUser(null)
+    setScreen(SCREEN.AUTH)
+  }, [])
+
+  // ── Background gradients per screen ──────────────────────────────────────
   const bgGradients = {
+    [SCREEN.AUTH]: 'bg-gradient-to-b from-mello-bg to-violet-50',
     [SCREEN.ENERGY_CHECK]: 'bg-gradient-to-b from-mello-bg to-violet-50',
     [SCREEN.BRAIN_DUMP]: 'bg-gradient-to-b from-mello-bg to-pink-50',
     [SCREEN.BREAKING_DOWN]: 'bg-mello-bg',
@@ -340,17 +311,18 @@ export default function App() {
     [SCREEN.CELEBRATING_STEP]: 'bg-gradient-to-b from-mello-bg to-green-50',
     [SCREEN.CELEBRATING_TASK]: 'bg-gradient-to-b from-mello-bg to-violet-100',
     [SCREEN.ALL_DONE]: 'bg-gradient-to-b from-violet-50 to-mello-bg',
+    [SCREEN.DASHBOARD]: 'bg-mello-bg',
   }
 
   return (
     <div className={`min-h-dvh transition-colors duration-500 ${bgGradients[screen] || 'bg-mello-bg'}`}>
-      {/* Screen Router */}
+
+      {screen === SCREEN.AUTH && (
+        <Auth onSkip={handleAuthSkip} onSignedIn={() => setScreen(SCREEN.ENERGY_CHECK)} />
+      )}
 
       {screen === SCREEN.ENERGY_CHECK && (
-        <EnergyCheck
-          onSelect={handleEnergySelect}
-          completedCount={completedCount}
-        />
+        <EnergyCheck onSelect={handleEnergySelect} completedCount={completedCount} />
       )}
 
       {screen === SCREEN.BRAIN_DUMP && (
@@ -358,7 +330,7 @@ export default function App() {
           energyLevel={energyLevel}
           onAddTask={handleAddTask}
           onStartFocus={handleStartFocus}
-          taskCount={tasks.filter((t) => t.status === 'pending').length}
+          taskCount={tasks.filter(t => t.status === 'pending').length}
         />
       )}
 
@@ -417,14 +389,35 @@ export default function App() {
       )}
 
       {screen === SCREEN.ALL_DONE && (
-        <AllDone
-          completedCount={completedCount}
-          onFreshStart={handleFreshStart}
+        <AllDone completedCount={completedCount} onFreshStart={handleFreshStart} />
+      )}
+
+      {screen === SCREEN.DASHBOARD && (
+        <Dashboard
+          stats={getStatsForDashboard()}
+          user={user}
+          onBack={() => setScreen(currentTask ? SCREEN.FOCUS : SCREEN.ENERGY_CHECK)}
+          onSignOut={handleSignOut}
         />
       )}
 
-      {/* Reset button — always accessible, never judgmental */}
-      {screen !== SCREEN.ENERGY_CHECK && screen !== SCREEN.ALL_DONE && (
+      {/* Dashboard button — accessible from all focus screens */}
+      {![SCREEN.AUTH, SCREEN.DASHBOARD, SCREEN.BREAKING_DOWN].includes(screen) && (
+        <button
+          onClick={handleOpenDashboard}
+          className="fixed top-5 right-5 w-10 h-10 rounded-full bg-white/80 backdrop-blur-sm
+                     border border-mello-border shadow-card text-base
+                     hover:bg-mello-secondary hover:scale-105
+                     transition-all active:scale-90 z-40"
+          title="View your progress"
+          aria-label="Open dashboard"
+        >
+          📊
+        </button>
+      )}
+
+      {/* Reset button */}
+      {![SCREEN.AUTH, SCREEN.ENERGY_CHECK, SCREEN.ALL_DONE, SCREEN.DASHBOARD].includes(screen) && (
         <button
           onClick={handleFreshStart}
           className="fixed bottom-6 right-6 w-10 h-10 rounded-full bg-white/80 backdrop-blur-sm
