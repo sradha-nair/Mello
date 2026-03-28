@@ -1,5 +1,9 @@
 # Mello — Setup Guide
 
+> **Live demo:** https://mello-black.vercel.app/
+
+> ⚠️ **Demo only** — This is a prototype of an ADHD productivity app. It does not include account creation or long-term progress tracking. Tasks are stored locally in your browser only.
+
 > An ADHD-friendly focus app. One task. One step. You've got this.
 
 ---
